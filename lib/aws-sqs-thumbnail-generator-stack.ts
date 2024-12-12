@@ -22,7 +22,7 @@ export class AwsSqsThumbnailGeneratorStack extends cdk.Stack {
 
     const dlq = new Queue(this, 'AwsSqsThumbnailGeneratorDeadLetterQueue', {
       queueName: 'thumbnail-generator-dlq',
-      retentionPeriod: cdk.Duration.days(14)
+      retentionPeriod: cdk.Duration.days(1)
     });
 
     const queue = new Queue(this, 'AwsSqsThumbnailGeneratorQueue', {
@@ -58,22 +58,22 @@ export class AwsSqsThumbnailGeneratorStack extends cdk.Stack {
       compatibleArchitectures: [Architecture.ARM_64]
     });
 
-    const processor = new NodejsFunction(this, 'AwsSqsThumbnailGeneratorProcessor', {
+    const generator = new NodejsFunction(this, 'AwsSqsThumbnailGeneratorProcessor', {
       functionName: 'thumbnail-generator-processor',
       runtime: Runtime.NODEJS_LATEST,
       handler: 'handler',
       entry: path.join(__dirname, './functions/thumbnail-generator.ts'),
       layers: [sharpLayer],
       architecture: Architecture.ARM_64,
-      timeout: cdk.Duration.minutes(1),
+      timeout: cdk.Duration.seconds(60),
       environment: {
         QUEUE_URL: queue.queueUrl
       }
     });
 
-    processor.addEventSource(new SqsEventSource(queue));
+    generator.addEventSource(new SqsEventSource(queue));
 
-    bucket.grantReadWrite(processor);
-    queue.grantConsumeMessages(processor);  
+    bucket.grantReadWrite(generator);
+    queue.grantConsumeMessages(generator);  
   }
 }

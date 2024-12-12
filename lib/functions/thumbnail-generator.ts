@@ -1,62 +1,108 @@
-import { Handler } from 'aws-lambda';
+import { Handler, SQSEvent, SQSRecord } from 'aws-lambda';
 import { S3, SQS } from 'aws-sdk';
 import sharp from 'sharp';
 
-const s3 = new S3();
-const sqs = new SQS();
+interface ThumbnailConfig {
+  width: number;
+  name: string;
+}
 
-const THUMBNAIL_WIDTHS = [
+interface S3EventMessage {
+  Records: Array<{
+    s3: {
+      bucket: { name: string };
+      object: { key: string };
+    };
+  }>;
+}
+
+const THUMBNAIL_CONFIGS: ThumbnailConfig[] = [
   { width: 50, name: 'small' },
   { width: 150, name: 'medium' },
   { width: 300, name: 'large' },
-];
+] as const;
 
-export const handler: Handler = async (event) => {
-  const record = event.Records[0];
-  const body = record.body;
-  try {
-    const message = JSON.parse(body).Records[0];
-    const bucket = message.s3.bucket.name;
-    const key = message.s3.object.key;
-    const filename = key.split('/').pop();
+const s3Client = new S3();
+const sqsClient = new SQS();
 
-    // Download image from S3
-    const image = await s3.getObject({ Bucket: bucket, Key: key }).promise();
+async function downloadImage(bucket: string, key: string): Promise<Buffer> {
+  const image = await s3Client.getObject({ Bucket: bucket, Key: key }).promise();
+  return image.Body as Buffer;
+}
 
-    // Generate thumbnails
-    const thumbnailPromises = THUMBNAIL_WIDTHS.map(async (size) => {
-      const resizedImage = await sharp(image.Body as Buffer)
-        .resize(size.width, null, { 
-          fit: 'contain',
-          withoutEnlargement: true
-        })
-        .toBuffer();
+async function generateThumbnail(
+  imageBuffer: Buffer,
+  width: number
+): Promise<Buffer> {
+  return sharp(imageBuffer)
+    .resize(width, null, { 
+      fit: 'contain',
+      withoutEnlargement: true 
+    })
+    .toBuffer();
+}
 
-      const thumbnailKey = `thumbnails/${size.name}/${filename}`;
+async function uploadThumbnail(
+  bucket: string,
+  key: string,
+  buffer: Buffer
+): Promise<void> {
+  await s3Client.putObject({
+    Bucket: bucket,
+    Key: key,
+    Body: buffer,
+    ContentType: 'image/jpeg'
+  }).promise();
+}
 
-      // Upload thumbnail to S3
-      await s3.putObject({
-        Bucket: bucket,
-        Key: thumbnailKey,
-        Body: resizedImage,
-        ContentType: 'image/jpeg'
-      }).promise();
-
+async function processImage(
+  bucket: string,
+  key: string,
+  imageBuffer: Buffer
+): Promise<string[]> {
+  const filename = key.split('/').pop() as string;
+  
+  return Promise.all(
+    THUMBNAIL_CONFIGS.map(async (config) => {
+      const thumbnailBuffer = await generateThumbnail(imageBuffer, config.width);
+      const thumbnailKey = `thumbnails/${config.name}/${filename}`;
+      
+      await uploadThumbnail(bucket, thumbnailKey, thumbnailBuffer);
       return thumbnailKey;
+    })
+  );
+}
+
+async function deleteSQSMessage(record: SQSRecord): Promise<void> {
+  await sqsClient.deleteMessage({
+    QueueUrl: process.env.QUEUE_URL!,
+    ReceiptHandle: record.receiptHandle
+  }).promise();
+}
+
+export const handler: Handler<SQSEvent> = async (event) => {
+  const record = event.Records[0];
+  
+  try {
+    const message = JSON.parse(record.body) as S3EventMessage;
+    const { bucket: { name: bucketName }, object: { key } } = message.Records[0].s3;
+
+    const imageBuffer = await downloadImage(bucketName, key);
+    const thumbnailKeys = await processImage(bucketName, key, imageBuffer);
+    await deleteSQSMessage(record);
+
+    console.log({
+      message: 'Successfully processed image',
+      image: key,
+      thumbnails: thumbnailKeys
     });
-
-    await Promise.all(thumbnailPromises);
-
-    // Delete SQS message after successful processing
-    await sqs.deleteMessage({
-      QueueUrl: process.env.QUEUE_URL!,
-      ReceiptHandle: record.receiptHandle
-    }).promise();
-
-    console.log(`Successfully processed image: ${key}`);
-    return;
+    return thumbnailKeys;
   } catch (error) {
-    console.error(`Error processing message: ${error}`);
+    console.error({
+      message: 'Error processing image',
+      error: error instanceof Error ? error.message : 'Unknown error',
+      record: record.body
+    });
     throw error;
   }
 };
