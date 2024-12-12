@@ -21,6 +21,8 @@ The application uses the following AWS services:
 
 ## How it Works
 
+![Diagram](./diagram.png)
+
 1. Upload an image to the S3 bucket's `/uploads` folder
 2. S3 triggers an event notification to SQS
 3. Lambda function processes the SQS message
